@@ -34,7 +34,39 @@ the street entrance, so the real gap is larger. Full method and caveats:
 | [docs/NARRATIVE.md](docs/NARRATIVE.md)                 | The story: key message, audience, takeaway and the poster's section layout. |
 | [scripts/step_free/](scripts/step_free/README.md)      | Python pipeline: fetches journeys, computes reach, draws the figures.       |
 | [scripts/step_free/output/](scripts/step_free/output/) | Results (`summary.json`, per-station times) and wall-ready SVG/PNG figures. |
-| `apps/website/`                                        | The DSI Developer Playground starter app, unmodified.                       |
+| `apps/website/`                                        | Interactive wall version, built on the DSI Developer Playground (below).    |
+
+## Interactive version for the Data Observatory wall
+
+The same story as a live, operator-driven wall app, built on the DSI Developer Playground.
+
+- **The wall splits in two:** columns 0–7 map travel times for everyone, columns 8–15 step-free
+  travel times. Each half is one continuous map of London across its screens.
+- **An operator tablet (`/control`) drives the story:** pick a starting station (South
+  Kensington, Wembley Park, Stratford, Brixton) and step through three scenes: _London_ (network
+  only), _Everyone_ (left half lights up), _Step-free_ (right half lights up alongside, with the
+  share of reach kept).
+- **Text sits on whole screens, never across a bezel,** at 20% of screen height for the
+  headline. Colour changes fade slowly; nothing flashes.
+
+Run it: `pnpm install`, `pnpm dev`, then open <http://localhost:5780>. The home page simulates
+the wall at half scale (8 × 2 screens, the same 7:1 shape as the real 16 × 4) with two
+tablets. On the real wall each screen loads `/screen?c=<column>&r=<row>`; without `cols`/`rows`
+parameters, screens assume the full 16 × 4 wall.
+
+How it follows the playground's [best practices](BEST_PRACTICES.md):
+
+- Tablets send small, complete commands (`control/origin`, `control/scene`). The bus validates
+  them, forwards only the validated fields, and keeps the current state for the `hello`
+  snapshot, so a screen that reloads mid-story rejoins in step.
+- Screens validate every message and the dataset before using them; tests cover this
+  (`pnpm run ready` runs format, lint, tests and build).
+- Everything a screen draws is computed from the shared state, the dataset and its own
+  position, so all screens agree without talking to each other.
+
+Known issue: the starter's luma.gl 9.2.6 throws on startup in the deck.gl renderer
+("reading 'maxTextureDimension2D'"), so screens use the MapLibre renderer by default. The
+deck.gl path is still available with `?renderer=deck` for testing.
 
 ## Reproduce the analysis
 
@@ -52,5 +84,4 @@ cd scripts/step_free && python analyse.py       # writes output/
 - Analysis and poster by Zak Nabi, Imperial College London.
 - Powered by the Transport for London Journey Planner API. Data provided by Transport for London.
 - Built on the [Data Observatory Developer Playground](https://github.com/dsi-icl/do-starter-playground)
-  by Imperial's Data Science Institute, licensed under Apache 2.0 (see [LICENSE](LICENSE)). To run
-  the starter app: `pnpm install`, then `pnpm dev`, and open <http://localhost:5780>.
+  by Imperial's Data Science Institute, licensed under Apache 2.0 (see [LICENSE](LICENSE)).

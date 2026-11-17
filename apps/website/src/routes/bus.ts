@@ -1,22 +1,13 @@
 import { createFileRoute } from '@tanstack/react-router';
 import { defineHooks } from 'crossws';
 
-import type {
-    BusMessage,
-    BusSharedState,
-    ScreenMapViewMessage,
-    ScreenSegmentSelectionMessage
-} from '../lib/realtime';
-import { isMapCity } from '../lib/realtime/map-cities';
+import type { BusMessage, BusSharedState } from '../lib/realtime';
+import { DEFAULT_SHARED_STATE, isOriginId, isSceneId } from '../lib/realtime/story';
 
 // In-memory bus state for this server process.
 // New clients receive this snapshot in the `hello` handshake so they can
 // join late without waiting for another control interaction.
-const busSharedState: BusSharedState = {
-    city: 'london',
-    zoom: 9,
-    selectedSegmentIndexes: []
-};
+const busSharedState: BusSharedState = { ...DEFAULT_SHARED_STATE };
 
 const hooks = defineHooks({
     open(peer) {
@@ -47,11 +38,14 @@ const hooks = defineHooks({
         } catch {
             return;
         }
-        updateBusSharedState(payload);
+        // Drop anything that isn't a valid story command instead of relaying it to every screen,
+        // and forward only the validated fields, never the raw payload.
+        const command = applyStoryCommand(payload);
+        if (!command) return;
 
         // Broadcast to all peers. Each client engine can ignore own echoes via peerId.
         peer.publish('do', {
-            ...payload,
+            ...command,
             peerId: peer.id,
             peerCount: peer.peers.size
         });
@@ -66,30 +60,17 @@ const hooks = defineHooks({
     }
 });
 
-function updateBusSharedState(payload: Partial<BusMessage>) {
-    if (payload.type === 'screen/map-view') {
-        const message = payload as Partial<ScreenMapViewMessage>;
-        // Preserve last known valid city/zoom for hello-state replay.
-        if (isMapCity(message.city)) {
-            busSharedState.city = message.city;
-        }
-
-        if (typeof message.view?.zoom === 'number') {
-            busSharedState.zoom = message.view.zoom;
-        }
-        return;
+function applyStoryCommand(payload: Partial<BusMessage>): BusMessage | null {
+    // Only known message types with valid values may change the snapshot late joiners receive.
+    if (payload.type === 'control/origin' && isOriginId(payload.origin)) {
+        busSharedState.origin = payload.origin;
+        return { type: payload.type, origin: payload.origin };
     }
-
-    if (payload.type === 'screen/segment-selection') {
-        const message = payload as Partial<ScreenSegmentSelectionMessage>;
-        if (!Array.isArray(message.indexes)) return;
-
-        // Keep indexes deterministic for easier equality checks in clients and debugging.
-        busSharedState.selectedSegmentIndexes = message.indexes
-            .filter((value): value is number => Number.isInteger(value) && value >= 0)
-            .slice()
-            .sort((a, b) => a - b);
+    if (payload.type === 'control/scene' && isSceneId(payload.scene)) {
+        busSharedState.scene = payload.scene;
+        return { type: payload.type, scene: payload.scene };
     }
+    return null;
 }
 
 export const Route = createFileRoute('/bus')({

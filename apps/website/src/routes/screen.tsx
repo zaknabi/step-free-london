@@ -1,52 +1,57 @@
-import { WebMercatorViewport } from '@deck.gl/core';
-import { LineLayer, ScatterplotLayer } from '@deck.gl/layers';
+import { ScatterplotLayer } from '@deck.gl/layers';
 import DeckGL from '@deck.gl/react';
 import { createFileRoute, useLocation } from '@tanstack/react-router';
 import { Map, type MapRef } from '@vis.gl/react-maplibre';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { screenEngine } from '../lib/realtime/engines/screen-engine';
+import { countWithin } from '../lib/realtime/step-free-data';
 import { useScreenStore } from '../lib/realtime/stores/screen-store';
-import type { ArcSegment, ScreenMapViewState } from '../lib/realtime/types';
+import { getOriginName, isHalfRevealed, type WallHalf } from '../lib/realtime/story';
+import type { OriginTimes, Station, StepFreeDataset } from '../lib/realtime/types';
+import {
+    bandFor,
+    NO_ROUTE,
+    ORIGIN_RING,
+    TRAVEL_BANDS,
+    UNREVEALED,
+    type Rgb
+} from '../lib/travel-bands';
+import {
+    deriveTileView,
+    fitHalfView,
+    locateTile,
+    parseScreenCoordinate,
+    parseWallSize,
+    SCREEN_HEIGHT,
+    type WallTile
+} from '../lib/wall';
 
 import 'maplibre-gl/dist/maplibre-gl.css';
 
-const WALL_COLS = 3;
-const WALL_ROWS = 2;
-const SCREEN_WIDTH = 1920;
-const SCREEN_HEIGHT = 1080;
-// Shared animation timings so transitions feel identical across all screen nodes.
-const MAP_TRANSITION_DURATION_MS = 1200;
-const LINE_REVEAL_DURATION_MS = 2000;
-const LINE_REVEAL_STEPS = 96;
+// Sizes are fractions of one screen's height so dots stay legible from across the room.
+const STATION_RADIUS_PX = Math.round(SCREEN_HEIGHT * 0.012);
+const ORIGIN_RING_RADIUS_PX = STATION_RADIUS_PX * 3;
+const ORIGIN_RING_WIDTH_PX = Math.round(SCREEN_HEIGHT * 0.004);
+// Slow colour fades keep scene and origin changes comfortable to watch on a wraparound wall.
+const COLOUR_TRANSITION_MS = 1500;
+// MapLibre can't animate data-driven colours, so its path dims the dots, swaps data, then
+// brightens them again: a gentle dip instead of a sudden switch.
+const MAPLIBRE_FADE_MS = 700;
 const MAP_STYLE = 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json';
-const SEGMENTS_SOURCE_ID = 'segments-source';
-const SEGMENTS_LAYER_ID = 'segments-layer';
-const MARKERS_SOURCE_ID = 'markers-source';
-const MARKERS_LAYER_ID = 'markers-layer';
+const STATIONS_SOURCE_ID = 'stations-source';
+const STATIONS_LAYER_ID = 'stations-layer';
+const ORIGIN_SOURCE_ID = 'origin-source';
+const ORIGIN_LAYER_ID = 'origin-layer';
 
-// Each `/screen` instance represents one wall tile (`c`,`r`) and computes
-// a local camera from shared wall state. We keep a lighter fallback renderer for
-// iframe deployments where multiple WebGL contexts are active at once.
+// Each `/screen` instance represents one wall tile (`c`,`r`). The left half of the wall shows
+// travel times for everyone, the right half step-free travel times, each as one continuous map.
+// Optional `cols`/`rows` let the simulator run a smaller wall with the same code.
 
-type CurvedSegment = {
-    id: string;
-    source: [number, number];
-    target: [number, number];
-    weight: number;
-    t: number;
-};
-
-type CurvedPath = {
-    id: string;
-    coordinates: Array<[number, number]>;
-    weight: number;
-};
-
-type SiteMarker = {
-    id: string;
+type StationMark = {
     position: [number, number];
-    weight: number;
+    fill: Rgb;
+    hollow: boolean;
 };
 
 export const Route = createFileRoute('/screen')({
@@ -57,22 +62,22 @@ function ScreenPage() {
     const { search } = useLocation();
     // Query params identify which physical panel this route instance represents.
     const searchParams = (search as Record<string, unknown>) ?? {};
-    const screenC = parseScreenCoordinate(searchParams.c, WALL_COLS, 0);
-    const screenR = parseScreenCoordinate(searchParams.r, WALL_ROWS, 0);
+    const wall = parseWallSize(searchParams.cols, searchParams.rows);
+    const screenC = parseScreenCoordinate(searchParams.c, wall.cols);
+    const screenR = parseScreenCoordinate(searchParams.r, wall.rows);
+    const tile = useMemo(
+        () => locateTile(screenC, screenR, wall),
+        [screenC, screenR, wall.cols, wall.rows]
+    );
 
-    const mapView = useScreenStore((state) => state.mapView);
-    const arcSegments = useScreenStore((state) => state.arcSegments);
-    const selectedSegmentIndexes = useScreenStore((state) => state.selectedSegmentIndexes);
+    const dataset = useScreenStore((state) => state.dataset);
+    const origin = useScreenStore((state) => state.origin);
+    const scene = useScreenStore((state) => state.scene);
     const [isClient, setIsClient] = useState(false);
     const [useDeckWrapper, setUseDeckWrapper] = useState(false);
-    const [animatedBaseMapView, setAnimatedBaseMapView] = useState(mapView);
-    const [deckRevealProgress, setDeckRevealProgress] = useState(1);
-    const animationFrameRef = useRef<number | null>(null);
-    const lineRevealFrameRef = useRef<number | null>(null);
-    const deckRevealFrameRef = useRef<number | null>(null);
-    const lastRevealedPathsRef = useRef<CurvedPath[] | null>(null);
-    const lastRevealedDeckSegmentsRef = useRef<CurvedSegment[] | null>(null);
     const [mapInstance, setMapInstance] = useState<ReturnType<MapRef['getMap']> | null>(null);
+    const fadeTimerRef = useRef<number | null>(null);
+    const wantsDeckRenderer = searchParams.renderer === 'deck';
 
     const setMapRef = useCallback((instance: MapRef | null) => {
         setMapInstance(instance?.getMap() ?? null);
@@ -80,556 +85,383 @@ function ScreenPage() {
 
     useEffect(() => {
         setIsClient(true);
-        // Avoid DeckGL context exhaustion in a 6-iframe wall layout.
-        // `window.top` path is used when opening a screen directly in its own tab, where one
-        // high-level DeckGL canvas is typically safe.
-        setUseDeckWrapper(window.self === window.top);
-        void screenEngine.ensureArcSegmentsLoaded();
-    }, []);
+        // MapLibre is the default renderer everywhere: it draws the same marks, is iframe-safe,
+        // and is what the wall needs. The DeckGL path is opt-in (`?renderer=deck`, own tab only)
+        // because luma.gl 9.2.6 throws on startup ("reading 'maxTextureDimension2D'": its
+        // CanvasContext resize handler runs without a ready device) and then draws nothing.
+        setUseDeckWrapper(wantsDeckRenderer && window.self === window.top);
+        void screenEngine.ensureDatasetLoaded();
+    }, [wantsDeckRenderer]);
 
-    useEffect(() => {
-        if (!isClient) return;
+    const originTimes = dataset?.origins.find((candidate) => candidate.id === origin) ?? null;
+    const revealed = isHalfRevealed(scene, tile.half);
+    const minutes = originTimes
+        ? tile.half === 'everyone'
+            ? originTimes.any
+            : originTimes.stepFree
+        : null;
 
-        if (animationFrameRef.current !== null) {
-            cancelAnimationFrame(animationFrameRef.current);
-            animationFrameRef.current = null;
-        }
+    const tileView = useMemo(() => {
+        if (!dataset) return null;
+        return deriveTileView(fitHalfView(dataset.stations, tile.halfCols, tile.rows), tile);
+    }, [dataset, tile]);
 
-        const from = animatedBaseMapView;
-        const to = mapView;
-        const startTime = performance.now();
-
-        const step = (now: number) => {
-            const elapsed = now - startTime;
-            const linearT = Math.min(1, elapsed / MAP_TRANSITION_DURATION_MS);
-            const t = easeInOutCubic(linearT);
-
-            setAnimatedBaseMapView(interpolateMapView(from, to, t));
-
-            if (linearT < 1) {
-                animationFrameRef.current = requestAnimationFrame(step);
-            } else {
-                animationFrameRef.current = null;
-            }
-        };
-
-        animationFrameRef.current = requestAnimationFrame(step);
-
-        return () => {
-            if (animationFrameRef.current !== null) {
-                cancelAnimationFrame(animationFrameRef.current);
-                animationFrameRef.current = null;
-            }
-        };
-    }, [isClient, mapView]);
-
-    useEffect(() => {
-        return () => {
-            if (lineRevealFrameRef.current !== null) {
-                cancelAnimationFrame(lineRevealFrameRef.current);
-                lineRevealFrameRef.current = null;
-            }
-            if (deckRevealFrameRef.current !== null) {
-                cancelAnimationFrame(deckRevealFrameRef.current);
-                deckRevealFrameRef.current = null;
-            }
-        };
-    }, []);
-
-    const localScreenMapView = useMemo(() => {
-        // Transform shared wall center view into per-panel view by offsetting camera in pixels.
-        return deriveScreenMapView(animatedBaseMapView, screenC, screenR);
-    }, [animatedBaseMapView, screenC, screenR]);
-
-    const filteredArcSegments = useMemo(() => {
-        // Empty selection means "show all" for quick demo exploration.
-        if (selectedSegmentIndexes.length === 0) return arcSegments;
-        const selectedIndexSet = new Set(selectedSegmentIndexes);
-        return arcSegments.filter((_, index) => selectedIndexSet.has(index));
-    }, [arcSegments, selectedSegmentIndexes]);
-
-    const curvedSegments = useMemo(
-        () => buildCurvedSegments(filteredArcSegments),
-        [filteredArcSegments]
-    );
-    const curvedPaths = useMemo(() => buildCurvedPaths(filteredArcSegments), [filteredArcSegments]);
-    const siteMarkers = useMemo(() => buildSiteMarkers(filteredArcSegments), [filteredArcSegments]);
-    const revealedDeckSegments = useMemo(
-        () => curvedSegments.filter((segment) => segment.t <= deckRevealProgress),
-        [curvedSegments, deckRevealProgress]
-    );
-    const segmentsGeojson = useMemo(
+    const marks = useMemo(
         () =>
-            ({
-                type: 'FeatureCollection',
-                features: curvedPaths.map((segment) => ({
-                    type: 'Feature',
-                    properties: {
-                        id: segment.id,
-                        weight: segment.weight
-                    },
-                    geometry: {
-                        type: 'LineString',
-                        coordinates: segment.coordinates
-                    }
-                }))
-            }) as const,
-        [curvedPaths]
+            dataset && originTimes && minutes
+                ? buildStationMarks(dataset.stations, minutes, revealed, originTimes.stationIndex)
+                : [],
+        [dataset, originTimes, minutes, revealed]
     );
-    const markersGeojson = useMemo(
-        () =>
-            ({
-                type: 'FeatureCollection',
-                features: siteMarkers.map((marker) => ({
-                    type: 'Feature',
-                    properties: {
-                        id: marker.id,
-                        weight: marker.weight
-                    },
-                    geometry: {
-                        type: 'Point',
-                        coordinates: marker.position
-                    }
-                }))
-            }) as const,
-        [siteMarkers]
-    );
+    const hollowMarks = useMemo(() => marks.filter((mark) => mark.hollow), [marks]);
+    const originPosition = useMemo<[number, number] | null>(() => {
+        if (!dataset || !originTimes) return null;
+        const station = dataset.stations[originTimes.stationIndex];
+        return [station.lon, station.lat];
+    }, [dataset, originTimes]);
 
-    useEffect(() => {
-        if (!isClient || !useDeckWrapper) return;
-
-        // Use reference checks instead of rebuilding ID signatures each update.
-        // `curvedSegments` is memoized, so a new reference already means meaningful data change.
-        if (lastRevealedDeckSegmentsRef.current === curvedSegments) return;
-        lastRevealedDeckSegmentsRef.current = curvedSegments;
-
-        if (deckRevealFrameRef.current !== null) {
-            cancelAnimationFrame(deckRevealFrameRef.current);
-            deckRevealFrameRef.current = null;
-        }
-
-        setDeckRevealProgress(0);
-        const startTime = performance.now();
-        const tick = (now: number) => {
-            const elapsed = now - startTime;
-            const t = Math.min(1, elapsed / LINE_REVEAL_DURATION_MS);
-            setDeckRevealProgress(t);
-
-            if (t < 1) {
-                deckRevealFrameRef.current = requestAnimationFrame(tick);
-            } else {
-                deckRevealFrameRef.current = null;
-            }
-        };
-
-        deckRevealFrameRef.current = requestAnimationFrame(tick);
-    }, [curvedSegments, isClient, useDeckWrapper]);
-
-    const lineLayer = useMemo(
-        () =>
-            new LineLayer<CurvedSegment>({
-                id: 'segments-lines',
-                // Progressive reveal keeps motion legible and avoids visual "pop in".
-                data: revealedDeckSegments,
-                getSourcePosition: (d) => d.source,
-                getTargetPosition: (d) => d.target,
-                getWidth: (d) => 3 + d.weight * 0.3,
-                widthUnits: 'pixels',
-                getColor: (d) => {
-                    return [
-                        Math.round(lerp(255, 255, d.t)),
-                        Math.round(lerp(72, 224, d.t)),
-                        Math.round(lerp(72, 102, d.t)),
-                        242
-                    ];
-                },
-                pickable: false
-            }),
-        [revealedDeckSegments]
-    );
-
-    const markerLayer = useMemo(
-        () =>
-            new ScatterplotLayer<SiteMarker>({
-                id: 'site-markers',
-                data: siteMarkers,
+    const deckLayers = useMemo(
+        () => [
+            new ScatterplotLayer<StationMark>({
+                id: 'stations',
+                // Every station stays in this layer (hollow ones fully transparent) so indices
+                // never shift and each station's colour fades from its own previous colour.
+                data: marks,
                 getPosition: (d) => d.position,
-                getRadius: (d) => 7 + d.weight * 1.4,
+                getFillColor: (d) => [...d.fill, d.hollow ? 0 : 255],
+                getRadius: STATION_RADIUS_PX,
                 radiusUnits: 'pixels',
-                radiusMinPixels: 7,
-                radiusMaxPixels: 28,
-                stroked: true,
-                lineWidthMinPixels: 2.5,
-                getLineColor: [255, 250, 210, 255],
-                getFillColor: [255, 255, 255, 255],
+                // Fade colours instead of snapping, for viewer comfort.
+                transitions: { getFillColor: COLOUR_TRANSITION_MS },
                 pickable: false
             }),
-        [siteMarkers]
+            new ScatterplotLayer<StationMark>({
+                id: 'no-route',
+                data: hollowMarks,
+                getPosition: (d) => d.position,
+                getRadius: STATION_RADIUS_PX,
+                radiusUnits: 'pixels',
+                filled: false,
+                stroked: true,
+                getLineColor: NO_ROUTE.rgb,
+                lineWidthUnits: 'pixels',
+                getLineWidth: ORIGIN_RING_WIDTH_PX / 2,
+                pickable: false
+            }),
+            new ScatterplotLayer<[number, number]>({
+                id: 'origin',
+                data: originPosition ? [originPosition] : [],
+                getPosition: (d) => d,
+                getRadius: ORIGIN_RING_RADIUS_PX,
+                radiusUnits: 'pixels',
+                filled: false,
+                stroked: true,
+                getLineColor: ORIGIN_RING.rgb,
+                lineWidthUnits: 'pixels',
+                getLineWidth: ORIGIN_RING_WIDTH_PX,
+                pickable: false
+            })
+        ],
+        [marks, hollowMarks, originPosition]
+    );
+
+    const stationsGeojson = useMemo(
+        () =>
+            ({
+                type: 'FeatureCollection',
+                features: marks.map((mark) => ({
+                    type: 'Feature',
+                    // Hollow (no-route) stations get a transparent fill and a visible ring.
+                    properties: {
+                        color: rgbaToCss(mark.fill, mark.hollow ? 0 : 1),
+                        hollow: mark.hollow
+                    },
+                    geometry: { type: 'Point', coordinates: mark.position }
+                }))
+            }) as const,
+        [marks]
+    );
+    const originGeojson = useMemo(
+        () =>
+            ({
+                type: 'FeatureCollection',
+                features: originPosition
+                    ? [
+                          {
+                              type: 'Feature',
+                              properties: {},
+                              geometry: { type: 'Point', coordinates: originPosition }
+                          }
+                      ]
+                    : []
+            }) as const,
+        [originPosition]
     );
 
     useEffect(() => {
-        if (!isClient || useDeckWrapper) return;
+        if (!isClient || useDeckWrapper || !mapInstance) return;
 
-        if (!mapInstance) return;
-
-        const syncLines = () => {
+        const syncLayers = () => {
             if (!mapInstance.isStyleLoaded()) return;
 
-            const startLineReveal = () => {
-                if (!mapInstance.getLayer(SEGMENTS_LAYER_ID)) return;
-                if (lastRevealedPathsRef.current === curvedPaths) return;
-                lastRevealedPathsRef.current = curvedPaths;
-
-                if (lineRevealFrameRef.current !== null) {
-                    cancelAnimationFrame(lineRevealFrameRef.current);
-                    lineRevealFrameRef.current = null;
-                }
-
-                const startTime = performance.now();
-                const tick = (now: number) => {
-                    const elapsed = now - startTime;
-                    const t = Math.min(1, elapsed / LINE_REVEAL_DURATION_MS);
-
-                    mapInstance.setPaintProperty(SEGMENTS_LAYER_ID, 'line-gradient', [
-                        'case',
-                        ['<=', ['line-progress'], t],
-                        ['interpolate', ['linear'], ['line-progress'], 0, '#ff4848', 1, '#ffe066'],
-                        'rgba(0,0,0,0)'
-                    ]);
-                    if (t < 1) {
-                        lineRevealFrameRef.current = requestAnimationFrame(tick);
-                    } else {
-                        lineRevealFrameRef.current = null;
-                        mapInstance.setPaintProperty(SEGMENTS_LAYER_ID, 'line-gradient', [
-                            'interpolate',
-                            ['linear'],
-                            ['line-progress'],
-                            0,
-                            '#ff4848',
-                            1,
-                            '#ffe066'
-                        ]);
-                    }
-                };
-
-                lineRevealFrameRef.current = requestAnimationFrame(tick);
-            };
-
-            const existingMarkerSource = mapInstance.getSource(MARKERS_SOURCE_ID) as
+            const stationsSource = mapInstance.getSource(STATIONS_SOURCE_ID) as
                 | { setData: (data: unknown) => void }
                 | undefined;
-            const existingSource = mapInstance.getSource(SEGMENTS_SOURCE_ID) as
+            const originSource = mapInstance.getSource(ORIGIN_SOURCE_ID) as
                 | { setData: (data: unknown) => void }
                 | undefined;
 
-            if (!existingMarkerSource) {
-                // Create once, then update data in-place to avoid recreating layers every frame.
-                mapInstance.addSource(MARKERS_SOURCE_ID, {
-                    type: 'geojson',
-                    data: markersGeojson as never
-                });
-
-                if (!mapInstance.getLayer(MARKERS_LAYER_ID)) {
-                    mapInstance.addLayer({
-                        id: MARKERS_LAYER_ID,
-                        type: 'circle',
-                        source: MARKERS_SOURCE_ID,
-                        paint: {
-                            'circle-radius': [
-                                'interpolate',
-                                ['linear'],
-                                ['get', 'weight'],
-                                0,
-                                10,
-                                10,
-                                24
-                            ],
-                            'circle-color': '#ffffff',
-                            'circle-opacity': 0.95,
-                            'circle-stroke-color': '#fffad2',
-                            'circle-stroke-width': 3,
-                            'circle-blur': 0.15
-                        }
-                    });
-                }
-            } else {
-                existingMarkerSource.setData(markersGeojson);
-            }
-
-            if (!existingSource) {
-                mapInstance.addSource(SEGMENTS_SOURCE_ID, {
-                    type: 'geojson',
-                    // lineMetrics is required for `line-progress` based animated gradients.
-                    lineMetrics: true,
-                    data: segmentsGeojson as never
-                });
-
-                if (!mapInstance.getLayer(SEGMENTS_LAYER_ID)) {
-                    mapInstance.addLayer({
-                        id: SEGMENTS_LAYER_ID,
-                        type: 'line',
-                        source: SEGMENTS_SOURCE_ID,
-                        layout: {
-                            'line-cap': 'round',
-                            'line-join': 'round'
-                        },
-                        paint: {
-                            'line-opacity': 0.95,
-                            'line-width': [
-                                'interpolate',
-                                ['linear'],
-                                ['get', 'weight'],
-                                0,
-                                3,
-                                10,
-                                10
-                            ],
-                            'line-gradient': [
-                                'interpolate',
-                                ['linear'],
-                                ['line-progress'],
-                                0,
-                                '#ff4848',
-                                1,
-                                '#ffe066'
-                            ],
-                            'line-blur': 0.2
-                        }
-                    });
-                }
-
-                startLineReveal();
+            if (stationsSource && originSource) {
+                // Fast path after first mount: update data in place instead of rebuilding layers,
+                // dimming first so the change reads as a soft fade rather than a jump.
+                setLayerOpacity(mapInstance, 0);
+                if (fadeTimerRef.current !== null) window.clearTimeout(fadeTimerRef.current);
+                fadeTimerRef.current = window.setTimeout(() => {
+                    fadeTimerRef.current = null;
+                    stationsSource.setData(stationsGeojson);
+                    originSource.setData(originGeojson);
+                    setLayerOpacity(mapInstance, 1);
+                }, MAPLIBRE_FADE_MS);
                 return;
             }
 
-            // Fast path for updates after first mount.
-            existingSource.setData(segmentsGeojson);
-            startLineReveal();
+            mapInstance.addSource(STATIONS_SOURCE_ID, {
+                type: 'geojson',
+                data: stationsGeojson as never
+            });
+            mapInstance.addLayer({
+                id: STATIONS_LAYER_ID,
+                type: 'circle',
+                source: STATIONS_SOURCE_ID,
+                paint: {
+                    'circle-radius': STATION_RADIUS_PX,
+                    'circle-color': ['get', 'color'],
+                    'circle-stroke-color': NO_ROUTE.hex,
+                    // Stations with no route are drawn as hollow rings.
+                    'circle-stroke-width': ['case', ['get', 'hollow'], ORIGIN_RING_WIDTH_PX / 2, 0],
+                    // Opacity stays a constant (not data-driven) so MapLibre can animate it.
+                    'circle-opacity': 1,
+                    'circle-stroke-opacity': 1,
+                    'circle-opacity-transition': { duration: MAPLIBRE_FADE_MS },
+                    'circle-stroke-opacity-transition': { duration: MAPLIBRE_FADE_MS }
+                }
+            });
+            mapInstance.addSource(ORIGIN_SOURCE_ID, {
+                type: 'geojson',
+                data: originGeojson as never
+            });
+            mapInstance.addLayer({
+                id: ORIGIN_LAYER_ID,
+                type: 'circle',
+                source: ORIGIN_SOURCE_ID,
+                paint: {
+                    'circle-radius': ORIGIN_RING_RADIUS_PX,
+                    'circle-opacity': 0,
+                    'circle-stroke-color': ORIGIN_RING.hex,
+                    'circle-stroke-width': ORIGIN_RING_WIDTH_PX,
+                    'circle-stroke-opacity': 1,
+                    'circle-stroke-opacity-transition': { duration: MAPLIBRE_FADE_MS }
+                }
+            });
         };
 
-        syncLines();
-        mapInstance.on('load', syncLines);
+        syncLayers();
+        mapInstance.on('load', syncLayers);
 
         return () => {
-            mapInstance.off('load', syncLines);
+            mapInstance.off('load', syncLayers);
         };
-    }, [curvedPaths, isClient, mapInstance, markersGeojson, segmentsGeojson, useDeckWrapper]);
+    }, [isClient, mapInstance, originGeojson, stationsGeojson, useDeckWrapper]);
+
+    useEffect(() => {
+        // Cancel a pending fade when the screen unmounts.
+        return () => {
+            if (fadeTimerRef.current !== null) window.clearTimeout(fadeTimerRef.current);
+        };
+    }, []);
 
     return (
-        <main className="pointer-events-none h-screen w-screen overflow-hidden bg-zinc-950 text-zinc-100">
-            <div className="relative flex h-full w-full items-center justify-center">
-                <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_30%_20%,rgba(34,197,94,0.14),transparent_40%),radial-gradient(circle_at_80%_70%,rgba(14,165,233,0.12),transparent_45%)]" />
-                <div className="relative z-30 flex h-full w-full flex-col items-center justify-center gap-4">
-                    <p className="text-sm tracking-[0.35em] text-zinc-400 uppercase md:text-lg">
-                        Screen Node
-                    </p>
-                    <h1 className="text-5xl font-semibold tracking-tight md:text-6xl">
-                        /screen?c={screenC}&r={screenR}
-                    </h1>
-                    <div className="text-md rounded-full border border-emerald-400/40 bg-emerald-400/10 px-4 py-1 text-emerald-300 md:text-3xl">
-                        Ready
-                    </div>
-                </div>
-                <div className="absolute inset-0 z-200">
-                    {isClient && useDeckWrapper ? (
-                        <DeckGL
-                            controller={false}
-                            viewState={localScreenMapView}
-                            layers={[markerLayer, lineLayer]}
-                            style={{ width: '100%', height: '100%' }}
-                        >
-                            <Map reuseMaps attributionControl={false} mapStyle={MAP_STYLE} />
-                        </DeckGL>
-                    ) : null}
+        <main className="pointer-events-none relative h-screen w-screen overflow-hidden bg-[#1f2029] text-[#f0efec]">
+            <div className="absolute inset-0">
+                {isClient && tileView && useDeckWrapper ? (
+                    <DeckGL
+                        controller={false}
+                        viewState={tileView}
+                        layers={deckLayers}
+                        style={{ width: '100%', height: '100%' }}
+                    >
+                        <Map reuseMaps attributionControl={false} mapStyle={MAP_STYLE} />
+                    </DeckGL>
+                ) : null}
 
-                    {isClient && !useDeckWrapper ? (
-                        // Iframe-safe fallback implementation: direct map rendering + imperative layers.
-                        <Map
-                            ref={setMapRef}
-                            reuseMaps
-                            attributionControl={false}
-                            mapStyle={MAP_STYLE}
-                            longitude={localScreenMapView.longitude}
-                            latitude={localScreenMapView.latitude}
-                            zoom={localScreenMapView.zoom}
-                            bearing={localScreenMapView.bearing}
-                            pitch={localScreenMapView.pitch}
-                            style={{ width: '100%', height: '100%' }}
-                        />
-                    ) : null}
-                </div>
+                {isClient && tileView && !useDeckWrapper ? (
+                    // Iframe-safe fallback implementation: direct map rendering + imperative layers.
+                    <Map
+                        ref={setMapRef}
+                        reuseMaps
+                        attributionControl={false}
+                        mapStyle={MAP_STYLE}
+                        longitude={tileView.longitude}
+                        latitude={tileView.latitude}
+                        zoom={tileView.zoom}
+                        bearing={tileView.bearing}
+                        pitch={tileView.pitch}
+                        style={{ width: '100%', height: '100%' }}
+                    />
+                ) : null}
             </div>
+
+            {/* Client-only, like the map: the dataset can arrive before hydration, and rendering
+                it then would make the client's first render differ from the server HTML. */}
+            {isClient && dataset && originTimes ? (
+                <TileOverlay
+                    tile={tile}
+                    dataset={dataset}
+                    originTimes={originTimes}
+                    revealed={revealed}
+                />
+            ) : null}
         </main>
     );
 }
 
-function parseScreenCoordinate(value: unknown, size: number, fallback: number) {
-    // SSR and direct route probes may hit `/screen` without `c`/`r`.
-    // Fail gracefully by falling back to a deterministic tile.
-    if (value === null || value === undefined) {
-        return Math.min(size - 1, Math.max(0, fallback));
-    }
-    const parsed =
-        typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : Number.NaN;
-    if (!Number.isInteger(parsed)) {
-        return Math.min(size - 1, Math.max(0, fallback));
-    }
-    // Clamp keeps out-of-range coordinates inside the supported wall grid.
-    return Math.min(size - 1, Math.max(0, parsed));
-}
+type TileOverlayProps = {
+    tile: WallTile;
+    dataset: StepFreeDataset;
+    originTimes: OriginTimes;
+    revealed: boolean;
+};
 
-function deriveScreenMapView(
-    baseView: ScreenMapViewState,
-    c: number,
-    r: number
-): ScreenMapViewState {
-    // Convert wall-level geographic center to screen-local center by:
-    // 1) projecting to pixels at a canonical screen resolution
-    // 2) applying tile offset for row/column
-    // 3) unprojecting back to lon/lat
-    const viewport = new WebMercatorViewport({
-        longitude: baseView.longitude,
-        latitude: baseView.latitude,
-        zoom: baseView.zoom,
-        bearing: baseView.bearing,
-        pitch: baseView.pitch,
-        width: SCREEN_WIDTH,
-        height: SCREEN_HEIGHT
-    });
-
-    const [centerX, centerY] = viewport.project([baseView.longitude, baseView.latitude]);
-
-    const pixelOffsetX = (c + 0.5 - WALL_COLS / 2) * SCREEN_WIDTH;
-    const pixelOffsetY = (r + 0.5 - WALL_ROWS / 2) * SCREEN_HEIGHT;
-
-    const [longitude, latitude] = viewport.unproject([
-        centerX + pixelOffsetX,
-        centerY + pixelOffsetY
-    ]);
-
-    return {
-        ...baseView,
-        longitude,
-        latitude
-    };
-}
-
-function buildCurvedSegments(segments: ArcSegment[]) {
-    const curved: CurvedSegment[] = [];
-
-    for (const segment of segments) {
-        const points = createCurvePoints(
-            segment.start,
-            segment.end,
-            LINE_REVEAL_STEPS,
-            segment.weight
+function TileOverlay({ tile, dataset, originTimes, revealed }: TileOverlayProps) {
+    // Text lives on whole screens (never across a bezel): each half's top-left screen carries its
+    // label, and the wall's bottom-right screen carries the legend and credits.
+    if (tile.localC === 0 && tile.r === 0) {
+        return (
+            <HalfLabel
+                half={tile.half}
+                dataset={dataset}
+                originTimes={originTimes}
+                revealed={revealed}
+            />
         );
-
-        for (let i = 0; i < points.length - 1; i++) {
-            const denominator = Math.max(1, points.length - 2);
-            curved.push({
-                id: `${segment.id}-${i}`,
-                source: points[i],
-                target: points[i + 1],
-                weight: segment.weight,
-                t: i / denominator
-            });
-        }
     }
-
-    return curved;
+    if (
+        tile.half === 'step-free' &&
+        tile.localC === tile.halfCols - 1 &&
+        tile.r === tile.rows - 1
+    ) {
+        return <Legend />;
+    }
+    return null;
 }
 
-function buildCurvedPaths(segments: ArcSegment[]): CurvedPath[] {
-    // Fewer points here reduce per-update geometry size for the fallback line source.
-    return segments.map((segment) => ({
-        id: segment.id,
-        coordinates: createCurvePoints(segment.start, segment.end, 32, segment.weight),
-        weight: segment.weight
-    }));
+type HalfLabelProps = {
+    half: WallHalf;
+    dataset: StepFreeDataset;
+    originTimes: OriginTimes;
+    revealed: boolean;
+};
+
+function HalfLabel({ half, dataset, originTimes, revealed }: HalfLabelProps) {
+    const threshold = dataset.reachThresholdMin;
+    const everyoneReach = countWithin(originTimes.any, threshold);
+    const stepFreeReach = countWithin(originTimes.stepFree, threshold);
+    const reach = half === 'everyone' ? everyoneReach : stepFreeReach;
+    // Share of everyone's reach a step-free traveller keeps: the demo's headline comparison.
+    const sharePercent = everyoneReach > 0 ? Math.round((stepFreeReach / everyoneReach) * 100) : 0;
+
+    return (
+        <section className="absolute inset-0 flex flex-col justify-center gap-[3vh] bg-[#1f2029]/90 px-[7vh]">
+            {/* Primary text at 20% of screen height, the starter's legibility baseline for ~10 m. */}
+            <h1 className="text-[20vh] leading-none font-bold tracking-tight">
+                {half === 'everyone' ? 'Everyone' : 'Step-free'}
+            </h1>
+            <p className="text-[8vh] leading-tight">
+                {revealed
+                    ? `${reach} stations within ${threshold} min`
+                    : half === 'everyone'
+                      ? 'Who can get where?'
+                      : "If you can't use stairs"}
+            </p>
+            {revealed && half === 'step-free' ? (
+                <p className="text-[8vh] leading-tight text-[#cde2fb]">
+                    {sharePercent}% of everyone's reach
+                </p>
+            ) : null}
+            <p className="text-[5vh] text-[#c3c2b7]">
+                from {getOriginName(originTimes.id)}, weekday 9am
+            </p>
+        </section>
+    );
 }
 
-function buildSiteMarkers(segments: ArcSegment[]): SiteMarker[] {
-    // One marker at each endpoint communicates connection density hotspots.
-    const markers: SiteMarker[] = [];
+function Legend() {
+    return (
+        <section className="absolute inset-0 flex flex-col justify-center gap-[2.5vh] bg-[#1f2029]/90 px-[7vh] text-[5vh] text-[#c3c2b7]">
+            {TRAVEL_BANDS.map((band) => (
+                <LegendRow key={band.label} label={band.label}>
+                    <span
+                        className="block h-full w-full rounded-full"
+                        style={{ backgroundColor: band.hex }}
+                    />
+                </LegendRow>
+            ))}
+            <LegendRow label="no route found">
+                <span
+                    className="block h-full w-full rounded-full border-[0.4vh]"
+                    style={{ borderColor: NO_ROUTE.hex }}
+                />
+            </LegendRow>
+            <LegendRow label="starting station">
+                <span
+                    className="block h-full w-full rounded-full border-[0.6vh]"
+                    style={{ borderColor: ORIGIN_RING.hex }}
+                />
+            </LegendRow>
+            <p className="mt-[2vh] text-[2.4vh] leading-snug text-[#8a8984]">
+                Powered by the Transport for London Journey Planner API.
+                <br />© OpenStreetMap contributors © CARTO
+            </p>
+        </section>
+    );
+}
 
-    for (const segment of segments) {
-        markers.push({
-            id: `${segment.id}-start`,
-            position: segment.start,
-            weight: segment.weight
+function LegendRow({ label, children }: { label: string; children: React.ReactNode }) {
+    return (
+        <div className="flex items-center gap-[3vh]">
+            <span className="block h-[5vh] w-[5vh] shrink-0">{children}</span>
+            <span>{label}</span>
+        </div>
+    );
+}
+
+function buildStationMarks(
+    stations: Station[],
+    minutes: Array<number | null>,
+    revealed: boolean,
+    originIndex: number
+): StationMark[] {
+    // Station order stays fixed (never sorted by time) so colour transitions interpolate each
+    // station's own colour rather than blending between different stations.
+    const marks: StationMark[] = [];
+    stations.forEach((station, index) => {
+        if (index === originIndex) return; // drawn as the origin ring instead
+        const value = minutes[index];
+        marks.push({
+            position: [station.lon, station.lat],
+            fill: !revealed ? UNREVEALED.rgb : value === null ? NO_ROUTE.rgb : bandFor(value).rgb,
+            hollow: revealed && value === null
         });
-        markers.push({
-            id: `${segment.id}-end`,
-            position: segment.end,
-            weight: segment.weight
-        });
-    }
-
-    return markers;
+    });
+    return marks;
 }
 
-function createCurvePoints(
-    start: [number, number],
-    end: [number, number],
-    steps: number,
-    weight: number
-): Array<[number, number]> {
-    const sx = start[0];
-    const sy = start[1];
-    const ex = end[0];
-    const ey = end[1];
-
-    const dx = ex - sx;
-    const dy = ey - sy;
-    const length = Math.max(1e-6, Math.sqrt(dx * dx + dy * dy));
-
-    const mx = (sx + ex) / 2;
-    const my = (sy + ey) / 2;
-
-    const px = -dy / length;
-    const py = dx / length;
-
-    // Stronger bowing for long-distance links keeps arcs visually distinct at wide zoom.
-    const weightFactor = 0.18 + Math.min(0.22, weight * 0.025);
-    const distanceFactor = Math.pow(length, 0.9);
-    const curvature = Math.min(3.4, distanceFactor * weightFactor);
-
-    const cx = mx + px * curvature;
-    const cy = my + py * curvature;
-
-    const points: Array<[number, number]> = [];
-    for (let i = 0; i <= steps; i++) {
-        const t = i / steps;
-        const omt = 1 - t;
-
-        const x = omt * omt * sx + 2 * omt * t * cx + t * t * ex;
-        const y = omt * omt * sy + 2 * omt * t * cy + t * t * ey;
-
-        points.push([x, y]);
-    }
-
-    return points;
+function rgbaToCss([r, g, b]: Rgb, alpha: number) {
+    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
-function interpolateMapView(
-    from: ScreenMapViewState,
-    to: ScreenMapViewState,
-    t: number
-): ScreenMapViewState {
-    return {
-        longitude: lerp(from.longitude, to.longitude, t),
-        latitude: lerp(from.latitude, to.latitude, t),
-        zoom: lerp(from.zoom, to.zoom, t),
-        bearing: lerp(from.bearing, to.bearing, t),
-        pitch: lerp(from.pitch, to.pitch, t)
-    };
-}
-
-function lerp(from: number, to: number, t: number) {
-    return from + (to - from) * t;
-}
-
-function easeInOutCubic(t: number) {
-    return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+function setLayerOpacity(map: ReturnType<MapRef['getMap']>, opacity: number) {
+    map.setPaintProperty(STATIONS_LAYER_ID, 'circle-opacity', opacity);
+    map.setPaintProperty(STATIONS_LAYER_ID, 'circle-stroke-opacity', opacity);
+    map.setPaintProperty(ORIGIN_LAYER_ID, 'circle-stroke-opacity', opacity);
 }

@@ -1,3 +1,5 @@
+import { DEFAULT_SHARED_STATE } from './story';
+
 export type BusMessage = {
     // Keep message kinds namespaced (`control/*`, `screen/*`).
     type: string;
@@ -12,22 +14,24 @@ export type HelloBusMessage = BusMessage & {
     state?: BusSharedState;
 };
 
-export type ControlSliderMessage = BusMessage & {
-    type: 'control/slider';
-    value: number;
+// NaPTAN ids of the origin stations analysed in scripts/step_free.
+export type OriginId = '940GZZLUSKS' | '940GZZLUWYP' | '940GZZLUSTD' | '940GZZLUBXN';
+
+export type SceneId = 'london' | 'everyone' | 'step-free';
+
+export type ControlOriginMessage = BusMessage & {
+    type: 'control/origin';
+    origin: OriginId;
 };
 
-export type ScreenSegmentSelectionMessage = BusMessage & {
-    type: 'screen/segment-selection';
-    indexes: number[];
+export type ControlSceneMessage = BusMessage & {
+    type: 'control/scene';
+    scene: SceneId;
 };
-
-export type MapCity = 'london' | 'paris' | 'berlin' | 'madrid' | 'rome' | 'amsterdam';
 
 export type BusSharedState = {
-    city: MapCity;
-    zoom: number;
-    selectedSegmentIndexes: number[];
+    origin: OriginId;
+    scene: SceneId;
 };
 
 export type ScreenMapViewState = {
@@ -38,17 +42,28 @@ export type ScreenMapViewState = {
     pitch: number;
 };
 
-export type ScreenMapViewMessage = BusMessage & {
-    type: 'screen/map-view';
-    view: Partial<ScreenMapViewState>;
-    city?: MapCity;
+export type Station = {
+    id: string;
+    name: string;
+    lon: number;
+    lat: number;
 };
 
-export type ArcSegment = {
-    id: string;
-    start: [number, number];
-    end: [number, number];
-    weight: number;
+export type OriginTimes = {
+    id: OriginId;
+    name: string;
+    // Index into `StepFreeDataset.stations` of the origin's own station.
+    stationIndex: number;
+    // Minutes per station, aligned with `stations`; null means no journey was found.
+    any: Array<number | null>;
+    stepFree: Array<number | null>;
+};
+
+export type StepFreeDataset = {
+    departure: string;
+    reachThresholdMin: number;
+    stations: Station[];
+    origins: OriginTimes[];
 };
 
 export type EngineRole = 'screen' | 'control';
@@ -75,38 +90,22 @@ export const createInitialEngineStoreState = (role: EngineRole): EngineStoreStat
     lastError: null
 });
 
-export type ControlStoreState = EngineStoreState & {
-    sliderValue: number;
-    isSliderInteracting: boolean;
-    selectedCity: MapCity;
-    selectedSegmentIndexes: number[];
-};
+export type ControlStoreState = EngineStoreState & BusSharedState;
 
-export type ScreenStoreState = EngineStoreState & {
-    mapView: ScreenMapViewState;
-    arcSegments: ArcSegment[];
-    selectedSegmentIndexes: number[];
-    isArcSegmentsLoading: boolean;
-};
+export type ScreenStoreState = EngineStoreState &
+    BusSharedState & {
+        dataset: StepFreeDataset | null;
+        isDatasetLoading: boolean;
+    };
 
 export const createInitialControlStoreState = (): ControlStoreState => ({
     ...createInitialEngineStoreState('control'),
-    sliderValue: 25,
-    isSliderInteracting: false,
-    selectedCity: 'london',
-    selectedSegmentIndexes: []
+    ...DEFAULT_SHARED_STATE
 });
 
 export const createInitialScreenStoreState = (): ScreenStoreState => ({
     ...createInitialEngineStoreState('screen'),
-    mapView: {
-        longitude: -0.1749,
-        latitude: 51.4988,
-        zoom: 9,
-        bearing: 0,
-        pitch: 0
-    },
-    arcSegments: [],
-    selectedSegmentIndexes: [],
-    isArcSegmentsLoading: false
+    ...DEFAULT_SHARED_STATE,
+    dataset: null,
+    isDatasetLoading: false
 });

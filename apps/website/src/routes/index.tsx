@@ -11,6 +11,10 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { useTheme } from '../lib/theme-provider';
 
+// Half-scale model of the real 16×4 wall: same 7:1 shape, a quarter of the screens.
+// Screens are told this size via `cols`/`rows`; without them they assume the full DO wall.
+const SIM_WALL = { cols: 8, rows: 2 } as const;
+
 type WallScreen = {
     // Logical wall coordinates.
     c: number;
@@ -27,11 +31,11 @@ function HomePage() {
     const isDark = theme === 'dark';
 
     const wallScreens = useMemo<WallScreen[]>(() => {
-        // Build a 3x2 wall coordinate system.
+        // Build the simulated wall coordinate system.
         // These coordinates map directly to `/screen?c=<col>&r=<row>`.
-        return Array.from({ length: 6 }, (_, index) => {
-            const c = index % 3;
-            const r = Math.floor(index / 3);
+        return Array.from({ length: SIM_WALL.cols * SIM_WALL.rows }, (_, index) => {
+            const c = index % SIM_WALL.cols;
+            const r = Math.floor(index / SIM_WALL.cols);
             return { c, r, id: `${r}-${c}` };
         });
     }, []);
@@ -69,7 +73,9 @@ function HomePage() {
         const nonce = refreshNonceById[screen.id] ?? 0;
         const disconnected = disconnectedById[screen.id] ?? false;
 
-        return disconnected ? `/noop?v=${nonce}` : `/screen?c=${screen.c}&r=${screen.r}&v=${nonce}`;
+        return disconnected
+            ? `/noop?v=${nonce}`
+            : `/screen?c=${screen.c}&r=${screen.r}&cols=${SIM_WALL.cols}&rows=${SIM_WALL.rows}&v=${nonce}`;
     };
 
     const toggleControlDisconnect = (id: string) => {
@@ -117,7 +123,8 @@ function HomePage() {
             <section className="flex min-h-0 flex-col rounded-xl border border-[var(--border)] bg-[var(--muted)] p-3">
                 <div className="mb-2 flex items-center justify-between">
                     <h2 className="text-sm font-medium text-[var(--foreground)]">
-                        Mini-DO (2 x 3) · 1920x1080 per unit
+                        Mini-DO ({SIM_WALL.cols} x {SIM_WALL.rows}, half-scale 16 x 4) · 1920x1080
+                        per unit
                     </h2>
                     <span className="rounded-full bg-[var(--primary)] px-2 py-1 text-[10px] font-medium text-[var(--primary-foreground)]">
                         /screen
@@ -125,14 +132,14 @@ function HomePage() {
                 </div>
 
                 <div className="bg-back m-auto flex h-fit items-start justify-center overflow-hidden">
-                    <div className="bg-back aspect-[8/3] h-full max-h-full w-full shadow-lg">
+                    <div className="bg-back aspect-[64/9] h-full max-h-full w-full shadow-lg">
                         {/*
                           Simulator wall:
                           - each iframe acts as one physical display node
                           - controls let developers test reconnect/refresh behavior quickly
                           - opening any screen in a new tab simulates standalone deployment
                         */}
-                        <div className="grid h-full w-full grid-cols-3 grid-rows-2 gap-0">
+                        <div className="grid h-full w-full grid-cols-8 grid-rows-2 gap-0">
                             {wallScreens.map((screen) => (
                                 <MiniWallScreen
                                     key={screen.id}

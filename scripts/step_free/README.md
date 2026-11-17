@@ -55,6 +55,9 @@ python scripts/step_free/fetch_journeys.py   # ~4,800 API calls, ~15 min; cached
 cd scripts/step_free && python analyse.py    # writes output/
 ```
 
+`analyse.py` also writes `apps/website/public/data/step-free.json`, the compact dataset the
+interactive wall app reads.
+
 Raw API responses are cached under `scripts/step_free/cache/` (not committed), so re-running only
 fetches what is missing.
 

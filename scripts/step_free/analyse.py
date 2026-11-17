@@ -12,6 +12,8 @@ from pathlib import Path
 import matplotlib
 
 matplotlib.use("Agg")  # render to files only, no window
+# Fixed salt so SVG element IDs are identical on every run (reproducible, diff-friendly output).
+matplotlib.rcParams["svg.hashsalt"] = "step-free-london"
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -22,6 +24,8 @@ from fetch_journeys import CACHE_DIR, DEPARTURE_DATE, DEPARTURE_TIME, ORIGINS
 HERE = Path(__file__).resolve().parent
 OUTPUT_DIR = HERE / "output"
 FIGURES_DIR = OUTPUT_DIR / "figures"
+# Compact dataset for the interactive Developer Playground version of the demo.
+APP_DATA_FILE = HERE.parents[1] / "apps" / "website" / "public" / "data" / "step-free.json"
 
 REACH_THRESHOLD_MIN = 45  # "a typical commute"
 
@@ -98,7 +102,8 @@ def save(fig, name: str) -> None:
     FIGURES_DIR.mkdir(parents=True, exist_ok=True)
     # Crop empty margins so the image drops into the poster at any size without dead space.
     crop = {"bbox_inches": "tight", "pad_inches": 0.4}
-    fig.savefig(FIGURES_DIR / f"{name}.svg", facecolor=SURFACE, **crop)
+    # No timestamp in the SVG metadata, again so re-runs produce byte-identical files.
+    fig.savefig(FIGURES_DIR / f"{name}.svg", facecolor=SURFACE, metadata={"Date": None}, **crop)
     fig.savefig(FIGURES_DIR / f"{name}.png", facecolor=SURFACE, dpi=PNG_DPI, **crop)
     plt.close(fig)
 
@@ -194,17 +199,55 @@ def slug(name: str) -> str:
     return name.lower().replace(" ", "_")
 
 
+def export_app_data(times: pd.DataFrame, stations: pd.DataFrame) -> None:
+    """Write stations plus per-origin minute arrays aligned to the station list.
+
+    Arrays (not one object per station) keep the file small; null means no journey found.
+    """
+    stations = stations.sort_values("station_id").reset_index(drop=True)
+    index_of = {station_id: i for i, station_id in enumerate(stations["station_id"])}
+
+    def minutes(group: pd.DataFrame, column: str) -> list:
+        by_station = group.set_index("station_id")[column]
+        values = [by_station.get(station_id) for station_id in stations["station_id"]]
+        return [None if v is None or pd.isna(v) else int(v) for v in values]
+
+    origins = []
+    for origin, name in ORIGINS.items():
+        group = times[times["origin"] == origin]
+        origins.append({
+            "id": origin,
+            "name": name,
+            "stationIndex": index_of[group_origin_station(origin, stations)],
+            "any": minutes(group, "any_min"),
+            "stepFree": minutes(group, "step_free_min"),
+        })
+
+    payload = {
+        "departure": f"{DEPARTURE_DATE} {DEPARTURE_TIME}",
+        "reachThresholdMin": REACH_THRESHOLD_MIN,
+        "stations": [
+            {"id": row.station_id, "name": row.name, "lon": round(row.lon, 5), "lat": round(row.lat, 5)}
+            for row in stations.itertuples()
+        ],
+        "origins": origins,
+    }
+    APP_DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
+    APP_DATA_FILE.write_text(json.dumps(payload, separators=(",", ":")) + "\n")
+
+
 def main() -> None:
     times = load_times()
     stations = pd.read_csv(CACHE_DIR / "stations.csv")
     summary = summarise(times)
 
     OUTPUT_DIR.mkdir(exist_ok=True)
-    (OUTPUT_DIR / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+    (OUTPUT_DIR / "summary.json").write_text(json.dumps(summary, indent=4) + "\n")
     times.to_csv(OUTPUT_DIR / "station_times.csv", index=False, float_format="%.0f")
 
     plot_origin_maps(times, stations)
     plot_reach_bars(summary)
+    export_app_data(times, stations)
     print(json.dumps(summary, indent=2))
 
 
