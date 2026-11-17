@@ -1,53 +1,56 @@
-# DO App Kit
+# Step-free London: who can get where?
 
-A starter for creating DO custom applications.
+How much smaller does London get if you can't use stairs? This repo holds the data analysis
+behind a poster for Imperial's Data Observatory,
+built in Vizzy Studio for the Data for Humanity Internship application.
 
-This starter repo is built with Vite+.
+![Stations reachable from South Kensington within a weekday-morning journey, for everyone and for step-free travellers](scripts/step_free/output/figures/map_south_kensington.png)
 
-## Runtime Context Note (Top-Level vs Iframe)
+## Key findings
 
-Data Observatory deployments may render an app either:
+Journeys from four stations to every station on London's rail network, departing Tuesday
+24 November 2026 at 09:00, from the TfL Journey Planner API:
 
-- as a top-level document, or
-- inside one or more iframes (for multi-screen orchestration/simulation).
+| From             | Stations within 45 min: everyone | Step-free | Share of reach kept |
+| ---------------- | -------------------------------- | --------- | ------------------- |
+| South Kensington | 418                              | 93        | 22%                 |
+| Wembley Park     | 280                              | 119       | 43%                 |
+| Brixton          | 397                              | 174       | 44%                 |
+| Stratford        | 366                              | 224       | 61%                 |
 
-This matters for graphics-heavy features: iframe-based deployments can increase pressure on
-browser/GPU context limits (especially with WebGL). For that reason, this example includes
-runtime-aware rendering decisions and fallback strategies so behavior remains stable in both modes.
+- From Imperial's own station, **South Kensington to Bank takes 22 minutes, or 54 minutes
+  step-free**.
+- The typical journey from South Kensington takes **26 minutes longer** step-free.
+- **Where you start matters**: of the four origins tested, Imperial's station loses the most.
 
-## Stack Used In This Example
+These are planned journeys, and for stations without step-free access the step-free route ends at
+the street entrance, so the real gap is larger. Full method and caveats:
+[scripts/step_free/README.md](scripts/step_free/README.md).
 
-The example app in `apps/website` focuses on three package groups:
+## What's in this repo
 
-- `@tanstack/react-router`: file-based routing and route-level app structure (`/`, `/control`, `/screen`, `/bus`).
-- `@tanstack/pacer`: throttling of high-frequency control events before broadcast (for example slider updates).
-- Mapping stack:
-  `maplibre-gl`, `@vis.gl/react-maplibre`, `@deck.gl/core`, `@deck.gl/layers`, `@deck.gl/react`.
-  These are used to render the map, draw animated paths/markers, and support both richer and iframe-safe rendering paths. We strongly recommend the use of Deck.GL with MapLibre as the DO natively supports them.
-- `vite-plus` (`vp`): monorepo task runner/repo manager used for project commands (`vp run dev`, `vp run build -r`, etc.).
+| Path                                                   | Contents                                                                    |
+| ------------------------------------------------------ | --------------------------------------------------------------------------- |
+| [docs/NARRATIVE.md](docs/NARRATIVE.md)                 | The story: key message, audience, takeaway and the poster's section layout. |
+| [scripts/step_free/](scripts/step_free/README.md)      | Python pipeline: fetches journeys, computes reach, draws the figures.       |
+| [scripts/step_free/output/](scripts/step_free/output/) | Results (`summary.json`, per-station times) and wall-ready SVG/PNG figures. |
+| `apps/website/`                                        | The DSI Developer Playground starter app, unmodified.                       |
 
-## Development
+## Reproduce the analysis
 
-- Check everything is ready:
-
-```bash
-vp run ready
-```
-
-- Run the tests:
-
-```bash
-vp run test -r
-```
-
-- Build the monorepo:
-
-```bash
-vp run build -r
-```
-
-- Run the development server:
+You need Python 3.12 and a free TfL API key from <https://api-portal.tfl.gov.uk/>, saved in
+`.env.local` at the repo root as `TFL_APP_KEY=...`.
 
 ```bash
-vp run dev
+pip install -r scripts/step_free/requirements.txt
+python scripts/step_free/fetch_journeys.py      # ~4,800 API calls, ~15 minutes, cached locally
+cd scripts/step_free && python analyse.py       # writes output/
 ```
+
+## Credits
+
+- Analysis and poster by Zak Nabi, Imperial College London.
+- Powered by the Transport for London Journey Planner API. Data provided by Transport for London.
+- Built on the [Data Observatory Developer Playground](https://github.com/dsi-icl/do-starter-playground)
+  by Imperial's Data Science Institute, licensed under Apache 2.0 (see [LICENSE](LICENSE)). To run
+  the starter app: `pnpm install`, then `pnpm dev`, and open <http://localhost:5780>.

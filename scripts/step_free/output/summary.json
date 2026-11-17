@@ -1,0 +1,34 @@
+{
+    "departure": "20261124 0900",
+    "reach_threshold_min": 45,
+    "origins": {
+        "South Kensington": {
+            "stations": 508,
+            "reach_45_any": 418,
+            "reach_45_step_free": 93,
+            "median_penalty_min": 26.0,
+            "no_step_free_route": 5
+        },
+        "Wembley Park": {
+            "stations": 508,
+            "reach_45_any": 280,
+            "reach_45_step_free": 119,
+            "median_penalty_min": 14.0,
+            "no_step_free_route": 5
+        },
+        "Stratford": {
+            "stations": 508,
+            "reach_45_any": 366,
+            "reach_45_step_free": 224,
+            "median_penalty_min": 13.0,
+            "no_step_free_route": 5
+        },
+        "Brixton": {
+            "stations": 508,
+            "reach_45_any": 397,
+            "reach_45_step_free": 174,
+            "median_penalty_min": 14.0,
+            "no_step_free_route": 5
+        }
+    }
+}
