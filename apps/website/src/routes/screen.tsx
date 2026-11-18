@@ -45,7 +45,7 @@ const ORIGIN_SOURCE_ID = 'origin-source';
 const ORIGIN_LAYER_ID = 'origin-layer';
 
 // Each `/screen` instance represents one wall tile (`c`,`r`). The left half of the wall shows
-// travel times for everyone, the right half step-free travel times, each as one continuous map.
+// travel times with stairs, the right half step-free travel times, each as one continuous map.
 // Optional `cols`/`rows` let the simulator run a smaller wall with the same code.
 
 type StationMark = {
@@ -96,7 +96,7 @@ function ScreenPage() {
     const originTimes = dataset?.origins.find((candidate) => candidate.id === origin) ?? null;
     const revealed = isHalfRevealed(scene, tile.half);
     const minutes = originTimes
-        ? tile.half === 'everyone'
+        ? tile.half === 'with-stairs'
             ? originTimes.any
             : originTimes.stepFree
         : null;
@@ -364,28 +364,29 @@ type HalfLabelProps = {
 
 function HalfLabel({ half, dataset, originTimes, revealed }: HalfLabelProps) {
     const threshold = dataset.reachThresholdMin;
-    const everyoneReach = countWithin(originTimes.any, threshold);
+    const withStairsReach = countWithin(originTimes.any, threshold);
     const stepFreeReach = countWithin(originTimes.stepFree, threshold);
-    const reach = half === 'everyone' ? everyoneReach : stepFreeReach;
-    // Share of everyone's reach a step-free traveller keeps: the demo's headline comparison.
-    const sharePercent = everyoneReach > 0 ? Math.round((stepFreeReach / everyoneReach) * 100) : 0;
+    const reach = half === 'with-stairs' ? withStairsReach : stepFreeReach;
+    // Share of the with-stairs reach a step-free traveller keeps: the headline comparison.
+    const sharePercent =
+        withStairsReach > 0 ? Math.round((stepFreeReach / withStairsReach) * 100) : 0;
 
     return (
         <section className="absolute inset-0 flex flex-col justify-center gap-[3vh] bg-[#1f2029]/90 px-[7vh]">
             {/* Primary text at 20% of screen height, the starter's legibility baseline for ~10 m. */}
             <h1 className="text-[20vh] leading-none font-bold tracking-tight">
-                {half === 'everyone' ? 'Everyone' : 'Step-free'}
+                {half === 'with-stairs' ? 'With stairs' : 'Step-free'}
             </h1>
             <p className="text-[8vh] leading-tight">
                 {revealed
                     ? `${reach} stations within ${threshold} min`
-                    : half === 'everyone'
+                    : half === 'with-stairs'
                       ? 'Who can get where?'
                       : "If you can't use stairs"}
             </p>
             {revealed && half === 'step-free' ? (
                 <p className="text-[8vh] leading-tight text-[#cde2fb]">
-                    {sharePercent}% of everyone's reach
+                    {sharePercent}% of the reach with stairs
                 </p>
             ) : null}
             <p className="text-[5vh] text-[#c3c2b7]">
@@ -406,7 +407,7 @@ function Legend() {
                     />
                 </LegendRow>
             ))}
-            <LegendRow label="no route found">
+            <LegendRow label="no step-free route">
                 <span
                     className="block h-full w-full rounded-full border-[0.4vh]"
                     style={{ borderColor: NO_ROUTE.hex }}

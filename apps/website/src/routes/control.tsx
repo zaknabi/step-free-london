@@ -50,7 +50,7 @@ function ControlPage() {
                             {SCENES.map((candidate, index) => (
                                 <Button
                                     key={candidate.id}
-                                    // Scenes reveal the story in order: London, then everyone, then
+                                    // Scenes reveal the story in order: London, then with stairs, then
                                     // step-free side by side.
                                     onClick={() => controlEngine.selectScene(candidate.id)}
                                     variant={scene === candidate.id ? 'highlight' : 'normal'}

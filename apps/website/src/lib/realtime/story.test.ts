@@ -15,14 +15,16 @@ describe('message validation', () => {
         expect(isOriginId(42)).toBe(false);
         expect(isSceneId('step-free')).toBe(true);
         expect(isSceneId('next')).toBe(false);
+        // The scene was renamed from `everyone`; stale messages using the old id are rejected.
+        expect(isSceneId('everyone')).toBe(false);
         expect(isSceneId(undefined)).toBe(false);
     });
 
     it('keeps valid fields and falls back per field for invalid ones', () => {
-        const fallback = { origin: '940GZZLUSTD', scene: 'everyone' } as const;
+        const fallback = { origin: '940GZZLUSTD', scene: 'with-stairs' } as const;
         expect(sanitizeSharedState({ origin: '940GZZLUBXN', scene: 'nope' }, fallback)).toEqual({
             origin: '940GZZLUBXN',
-            scene: 'everyone'
+            scene: 'with-stairs'
         });
         expect(sanitizeSharedState({ origin: '<script>', scene: 'london' }, fallback)).toEqual({
             origin: '940GZZLUSTD',
@@ -37,12 +39,12 @@ describe('message validation', () => {
 });
 
 describe('scene reveal order', () => {
-    it('reveals everyone first, then step-free alongside', () => {
-        expect(isHalfRevealed('london', 'everyone')).toBe(false);
+    it('reveals with stairs first, then step-free alongside', () => {
+        expect(isHalfRevealed('london', 'with-stairs')).toBe(false);
         expect(isHalfRevealed('london', 'step-free')).toBe(false);
-        expect(isHalfRevealed('everyone', 'everyone')).toBe(true);
-        expect(isHalfRevealed('everyone', 'step-free')).toBe(false);
-        expect(isHalfRevealed('step-free', 'everyone')).toBe(true);
+        expect(isHalfRevealed('with-stairs', 'with-stairs')).toBe(true);
+        expect(isHalfRevealed('with-stairs', 'step-free')).toBe(false);
+        expect(isHalfRevealed('step-free', 'with-stairs')).toBe(true);
         expect(isHalfRevealed('step-free', 'step-free')).toBe(true);
     });
 });

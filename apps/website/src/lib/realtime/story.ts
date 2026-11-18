@@ -1,6 +1,6 @@
 import type { BusSharedState, OriginId, SceneId } from './types';
 
-// Origins mirror `ORIGINS` in scripts/step_free/fetch_journeys.py; the dataset holds their times.
+// Origins mirror `ORIGINS` in poster/analysis/fetch_journeys.py; the dataset holds their times.
 // Kept as a fixed list so the bus server can validate messages without loading the dataset.
 export const ORIGINS: ReadonlyArray<{ id: OriginId; name: string }> = [
     { id: '940GZZLUSKS', name: 'South Kensington' },
@@ -11,11 +11,11 @@ export const ORIGINS: ReadonlyArray<{ id: OriginId; name: string }> = [
 
 // Scenes reveal the story one step at a time:
 // - `london`: both halves show the network uncoloured
-// - `everyone`: the left half reveals travel times for everyone
+// - `with-stairs`: the left half reveals travel times with stairs (TfL's "no requirements")
 // - `step-free`: the right half reveals step-free travel times alongside
 export const SCENES: ReadonlyArray<{ id: SceneId; label: string }> = [
     { id: 'london', label: 'London' },
-    { id: 'everyone', label: 'Everyone' },
+    { id: 'with-stairs', label: 'With stairs' },
     { id: 'step-free', label: 'Step-free' }
 ];
 
@@ -39,11 +39,11 @@ export function getOriginName(origin: OriginId) {
 
 // Which half of the wall shows coloured travel times in each scene.
 export function isHalfRevealed(scene: SceneId, half: WallHalf) {
-    if (half === 'everyone') return scene === 'everyone' || scene === 'step-free';
+    if (half === 'with-stairs') return scene === 'with-stairs' || scene === 'step-free';
     return scene === 'step-free';
 }
 
-export type WallHalf = 'everyone' | 'step-free';
+export type WallHalf = 'with-stairs' | 'step-free';
 
 export function sanitizeSharedState(
     candidate: unknown,

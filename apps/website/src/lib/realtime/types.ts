@@ -14,10 +14,10 @@ export type HelloBusMessage = BusMessage & {
     state?: BusSharedState;
 };
 
-// NaPTAN ids of the origin stations analysed in scripts/step_free.
+// NaPTAN ids of the origin stations analysed in poster/analysis.
 export type OriginId = '940GZZLUSKS' | '940GZZLUWYP' | '940GZZLUSTD' | '940GZZLUBXN';
 
-export type SceneId = 'london' | 'everyone' | 'step-free';
+export type SceneId = 'london' | 'with-stairs' | 'step-free';
 
 export type ControlOriginMessage = BusMessage & {
     type: 'control/origin';

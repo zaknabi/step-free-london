@@ -45,7 +45,7 @@ export function parseScreenCoordinate(value: unknown, size: number) {
 export function locateTile(c: number, r: number, wall: WallSize): WallTile {
     const halfCols = wall.cols / 2;
     return {
-        half: c < halfCols ? 'everyone' : 'step-free',
+        half: c < halfCols ? 'with-stairs' : 'step-free',
         localC: c % halfCols,
         r,
         halfCols,

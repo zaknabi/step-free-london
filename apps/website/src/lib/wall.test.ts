@@ -37,8 +37,8 @@ describe('parseScreenCoordinate', () => {
 });
 
 describe('locateTile', () => {
-    it('splits the wall into an everyone half and a step-free half', () => {
-        expect(locateTile(7, 0, DO_WALL)).toMatchObject({ half: 'everyone', localC: 7 });
+    it('splits the wall into a with-stairs half and a step-free half', () => {
+        expect(locateTile(7, 0, DO_WALL)).toMatchObject({ half: 'with-stairs', localC: 7 });
         expect(locateTile(8, 3, DO_WALL)).toMatchObject({ half: 'step-free', localC: 0, r: 3 });
     });
 });
@@ -46,7 +46,7 @@ describe('locateTile', () => {
 describe('deriveTileView', () => {
     const centre = { longitude: -0.12, latitude: 51.5, zoom: 10, bearing: 0, pitch: 0 };
     const tileAt = (localC: number, r: number): WallTile => ({
-        half: 'everyone',
+        half: 'with-stairs',
         localC,
         r,
         halfCols: 8,

@@ -26,7 +26,7 @@ dist-ssr
 # Dependency directories and files
 node_modules
 .vite*/
-# Python: raw TfL downloads and notebook clutter (see scripts/step_free)
-scripts/**/cache/
+# Python: raw TfL downloads and notebook clutter (see poster/analysis)
+poster/analysis/cache/
 __pycache__/
 .ipynb_checkpoints/

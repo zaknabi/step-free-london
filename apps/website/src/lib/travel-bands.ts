@@ -1,4 +1,4 @@
-// Same palette as the poster figures (scripts/step_free/analyse.py), validated there for
+// Same palette as the poster figures (poster/analysis/make_poster_figures.py), validated for
 // colour-blind separation and contrast on a dark surface. Brightest = closest, so what you can
 // reach "glows"; everything past the threshold drops to a dim grey.
 export type Rgb = [number, number, number];

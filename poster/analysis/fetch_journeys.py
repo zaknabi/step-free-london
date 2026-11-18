@@ -1,8 +1,8 @@
 """Fetch journey times from a few origin stations to every TfL station, with and without
 step-free access, using the TfL Journey Planner API.
 
-Run from anywhere:  python scripts/step_free/fetch_journeys.py
-Output:             scripts/step_free/cache/journeys.csv (one row per origin, destination, mode)
+Run from anywhere:  python poster/analysis/fetch_journeys.py
+Output:             poster/analysis/cache/journeys.csv (one row per origin, destination, mode)
 
 Every API response is cached as a small JSON file, so re-running only fetches what is missing.
 """
